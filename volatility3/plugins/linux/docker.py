@@ -509,9 +509,7 @@ class InspectNetworks():
                 yield network, containers_ids
 
 
-class Docker(interfaces.plugins.PluginInterface):
-    """ Main class for docker plugin """
-
+class GenericDockerPlugin(interfaces.plugins.PluginInterface):
     _required_framework_version = (2, 0, 0)
     _version = (1, 0, 0)
 
@@ -529,43 +527,9 @@ class Docker(interfaces.plugins.PluginInterface):
                 requirements.PluginRequirement(name='ifconfig',
                                                plugin=ifconfig.Ifconfig,
                                                version=(1, 0, 0)),
-
-                # Plugin options
-                requirements.BooleanRequirement(name='detector',
-                                                description='Detect Docker daemon / containers in memory',
-                                                optional=True,
-                                                default=False),
-                requirements.BooleanRequirement(name='ps',
-                                                description='List of running containers',
-                                                optional=True,
-                                                default=False),
-                requirements.BooleanRequirement(name='ps-extended',
-                                                description='Extended list of running containers',
-                                                optional=True,
-                                                default=False),
-                requirements.BooleanRequirement(name='inspect-caps',
-                                                description='Inspect containers capabilities',
-                                                optional=True,
-                                                default=False),
-                requirements.BooleanRequirement(name='inspect-mounts',
-                                                description='Show a list of containers mounts',
-                                                optional=True,
-                                                default=False),
-                requirements.BooleanRequirement(name='inspect-mounts-extended',
-                                                description="Show detailed list of containers mounts",
-                                                optional=True,
-                                                default=False),
-                requirements.BooleanRequirement(name='inspect-networks',
-                                                description="Show detailed list of containers networks",
-                                                optional=True,
-                                                default=False),
-                requirements.BooleanRequirement(name='inspect-networks-extended',
-                                                description="Show detailed list of containers networks",
-                                                optional=True,
-                                                default=False),
-                ]
-
-    def _generator(self):
+        ]
+    
+    def _generator(self, mode):
 
         vmlinux = self.context.modules[self.config['kernel']]
 
@@ -573,7 +537,7 @@ class Docker(interfaces.plugins.PluginInterface):
         tasks_list = list(docker_pslist.PsList.list_tasks(self.context, vmlinux.name))
 
         # If user chose detector, generate detection table
-        if self.config.get("detector"):
+        if mode == 'detector':
             detection_values = Detector(
                 self.context, vmlinux, tasks_list).generate_detection_list()
 
@@ -582,94 +546,111 @@ class Docker(interfaces.plugins.PluginInterface):
                 yield (0, row)
 
         # If user chose ps, generate containers list
-        if self.config.get("ps"):
+        if mode == 'ps':
             for container_row in Ps(self.context, vmlinux, tasks_list).generate_list(extended=False):
                 yield (0, container_row)
 
         # If user chose ps, generate containers list
-        if self.config.get("ps-extended"):
+        if mode == 'ps-extended':
             for container_row in Ps(self.context, vmlinux, tasks_list).generate_list(extended=True):
                 yield (0, container_row)
 
         # If user chose inspect-caps, generate containers list and check their capabilities
-        if self.config.get("inspect-caps"):
+        if mode == "inspect-caps":
             containers_pids = Ps(self.context, vmlinux,
                                  tasks_list).get_containers_pids()
             for container_row in InspectCaps(self.context, vmlinux, tasks_list, containers_pids).generate_containers_caps_list():
                 yield (0, container_row)
 
         # If user chose inspect-mounts, generate containers list and check their mounts
-        if self.config.get("inspect-mounts"):
+        if mode == "inspect-mounts":
             containers_pids = Ps(self.context, vmlinux,
                                  tasks_list).get_containers_pids()
             for container_row in InspectMounts(self.context, vmlinux, tasks_list, containers_pids).generate_mounts_list(extended=False):
                 yield (0, container_row)
 
         # If user chose inspect-mounts, generate containers list and check their mounts
-        if self.config.get("inspect-mounts-extended"):
+        if mode == "inspect-mounts-extended":
             containers_pids = Ps(self.context, vmlinux,
                                  tasks_list).get_containers_pids()
             for container_row in InspectMounts(self.context, vmlinux, tasks_list, containers_pids).generate_mounts_list(extended=True):
                 yield (0, container_row)
 
         # If user chose inspect-networks
-        if self.config.get("inspect-networks"):
+        if mode == "inspect-networks":
             containers_pids = Ps(self.context, vmlinux,
                                  tasks_list).get_containers_pids()
             for container_row in InspectNetworks(self.context, vmlinux, tasks_list, containers_pids).generate_networks_list(extended=False):
                 yield (0, container_row)
 
         # If user chose inspect-networks
-        if self.config.get("inspect-networks-extended"):
+        if mode == "inspect-networks-extended":
             containers_pids = Ps(self.context, vmlinux,
                                  tasks_list).get_containers_pids()
             for container_row in InspectNetworks(self.context, vmlinux, tasks_list, containers_pids).generate_networks_list(extended=True):
                 yield (0, container_row)
-
-    def run(self):
+    
+    def _run(self, mode):
 
         columns = []
 
-        if not self.config.get("detector") and not self.config.get("inspect-caps") \
-                and not self.config.get("ps") and not self.config.get("ps-extended") \
-                and not self.config.get("inspect-mounts") and not self.config.get("inspect-mounts-extended") \
-                and not self.config.get("inspect-networks") and not self.config.get("inspect-networks-extended"):
-
-            vollog.error('No option selected')
-            raise exceptions.PluginRequirementException('No option selected')
-
-        if self.config.get("detector"):
+        if mode == "detector":
             columns.extend([('Docker inetrface', bool), ('Docker veth', bool),
                             ('Mounted Overlay FS', bool), ('Containerd-shim is running', bool)])
 
-        if self.config.get("ps"):
+        if mode =="ps":
             columns.extend([('Container ID', str), ('Command', str), ('Creation Time (UTC)', str),
                             ('PID', int)])
 
-        if self.config.get("ps-extended"):
+        if mode == "ps-extended":
             columns.extend([('Creation time (UTC)', str), ('Command', str), ('Container ID', str),
                             ('Is privileged', bool), ('PID', int), ('Effective UID', int)])
 
-        if self.config.get("inspect-caps"):
+        if mode == "inspect-caps":
             columns.extend([('PID', int), ('Container ID', str), (
                 'Effective Capabilities Mask', str), ('Effective Capabilities Names', str)])
 
-        if self.config.get("inspect-mounts"):
+        if mode == "inspect-mounts":
             columns.extend([('PID', int), ('Container ID', str), ('Container Path', str),
                             ('Host Path', str), ('FS type', str)])
 
-        if self.config.get("inspect-mounts-extended"):
+        if mode == "inspect-mounts-extended":
             columns.extend([('PID', int), ('Container ID', str), ('Mount ID', int),
                             ('Parent ID', int), ('Device name', str), ('Path', str),
                             ('Absolute Path', str), ('FS Type', str), ('Access', str),
                             ('Flags', str)])
 
-        if self.config.get("inspect-networks"):
+        if mode == "inspect-networks":
             columns.extend(
                 [('Network /16 Segment', str), ('Containers IDs', str)])
 
-        if self.config.get("inspect-networks-extended"):
+        if mode == "inspect-networks-extended":
             columns.extend([('Network /16 Segment', str),
                            ('Containers IDs', str), ('Containers PIDs', str)])
 
-        return renderers.TreeGrid(columns, self._generator())
+        return renderers.TreeGrid(columns, self._generator(mode))
+
+
+class DockerDetector(GenericDockerPlugin):
+    def run(self):
+        return self._run('detector')
+
+
+class DockerPs(GenericDockerPlugin):
+    def run(self):
+        return self._run('ps-extended')
+
+
+class DockerInspectCaps(GenericDockerPlugin):
+    def run(self):
+        return self._run('inspect-caps')
+
+
+class DockerInspectMounts(GenericDockerPlugin):
+    def run(self):
+        return self._run('inspect-mounts-extended')
+
+
+class DockerInspectNetworks(GenericDockerPlugin):
+    def run(self):
+        return self._run('inspect-networks-extended')
