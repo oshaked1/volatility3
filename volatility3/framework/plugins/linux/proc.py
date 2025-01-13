@@ -196,9 +196,10 @@ class Maps(plugins.PluginInterface):
                     dentry = vma.vm_file.get_dentry()
                     if dentry != 0:
                         inode_object = dentry.d_inode
-                        major = inode_object.i_sb.major
-                        minor = inode_object.i_sb.minor
-                        inode = inode_object.i_ino
+                        if inode_object != 0:
+                            major = inode_object.i_sb.major
+                            minor = inode_object.i_sb.minor
+                            inode = inode_object.i_ino
                 path = vma.get_name(self.context, task)
 
                 file_output = "Disabled"
