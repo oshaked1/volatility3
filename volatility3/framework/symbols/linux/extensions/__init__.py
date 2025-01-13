@@ -26,6 +26,12 @@ vollog = logging.getLogger(__name__)
 # Keep these in a basic module, to prevent import cycles when symbol providers require them
 
 
+class VolTimespec:
+    def __init__(self, secs: int, nsecs: int):
+        self.tv_sec = secs
+        self.tv_nsec = nsecs
+
+
 class module(generic.GenericIntelProcess):
 
     def is_valid(self):
@@ -648,6 +654,61 @@ class task_struct(generic.GenericIntelProcess):
             ppid = 0
 
         return ppid
+    
+    def _get_upid(self):
+        if self.has_member('thread_pid'):
+            pid_struct = self.thread_pid.dereference()
+        elif self.has_member('pids'):
+            pid_struct = self.pids[0].pid.dereference()
+        else:
+            raise AttributeError('Unable to find task_struct -> upid')
+
+        try:
+            return pid_struct.numbers[pid_struct.level]
+        # The numbers array is defined as a single element in size, but in practice it may have an arbitrary size.
+        # Beacuase C doesn't care about out-of-bounds access, there's no problem accessing indexes other than 0
+        # during run time, but python won't let us so we need to redefine this array as the appropriate size.
+        except IndexError:
+            pid_struct.numbers.count = pid_struct.level + 1
+            return pid_struct.numbers[pid_struct.level]
+    
+    def get_pid_ns(self):
+        """Returns the pid_namespace struct of the current task."""
+        try:
+            return self._get_upid().ns.dereference()
+        except AttributeError:
+            return self.nsproxy.pid_ns_for_children.dereference()
+    
+    def get_namespace_pid(self):
+        """Returns the pid of the task as it is seen from within its pid namespace."""
+        return self._get_upid().nr
+    
+    def get_mnt_ns(self):
+        """Returns the mnt_namespace struct of the current task."""
+        if self.has_member('nsproxy'):
+            return self.nsproxy.get_mnt_ns()
+        elif self.has_member('namespace'):
+            return self.namespace.dereference()
+        else:
+            raise AttributeError('Unable to find task -> mnt_namespace')
+    
+    def get_start_time(self, boot_time: int) -> int:
+        """Returns the start time of the task as a Unix timestamp."""
+        nsecs_per_sec = 1000000000
+
+        if self.has_member('real_start_time'):
+            start_time = self.real_start_time
+            if not start_time.has_member('tv_sec'):
+                start_time = VolTimespec(start_time / nsecs_per_sec, start_time % nsecs_per_sec)
+        else:
+            start_time = VolTimespec(self.start_boottime / nsecs_per_sec, self.start_boottime % nsecs_per_sec)
+
+        start_secs = start_time.tv_sec + (start_time.tv_nsec / nsecs_per_sec / 100)
+
+        if boot_time != -1:
+            return boot_time + start_secs
+
+        return 0
 
 
 class fs_struct(objects.StructType):
@@ -1277,6 +1338,58 @@ class hlist_head(objects.StructType):
             current = current.next
 
 
+class hlist_node(objects.StructType, collections.abc.Iterable):
+
+    def to_list(self,
+                symbol_type: str,
+                member: str,
+                forward: bool = True,
+                sentinel: bool = False,
+                layer: Optional[str] = None) -> Iterator[interfaces.objects.ObjectInterface]:
+        """Returns an iterator of the entries in the list.
+
+        Args:
+                symbol_type: Type of the list elements
+                member: Name of the hlist_node member in the list elements
+                forward: Set false to go backwards
+                sentinel: Whether self is a "sentinel node", meaning it is not embedded in a member of the list
+                Sentinel nodes are NOT yielded. See https://en.wikipedia.org/wiki/Sentinel_node for further reference
+                layer: Name of layer to read from
+        Yields:
+            Objects of the type specified via the "symbol_type" argument.
+
+        """
+        layer = layer or self.vol.layer_name
+
+        relative_offset = self._context.symbol_space.get_type(symbol_type).relative_child_offset(member)
+
+        direction = 'pprev'
+        if forward:
+            direction = 'next'
+        try:
+            link = getattr(self, direction).dereference()
+        except exceptions.InvalidAddressException:
+            return
+
+        if not sentinel:
+            yield self._context.object(symbol_type, layer, offset = self.vol.offset - relative_offset)
+
+        seen = {self.vol.offset}
+        while link.vol.offset != 0 and link.vol.offset not in seen:
+
+            obj = self._context.object(symbol_type, layer, offset = link.vol.offset - relative_offset)
+            yield obj
+
+            seen.add(link.vol.offset)
+            try:
+                link = getattr(link, direction).dereference()
+            except exceptions.InvalidAddressException:
+                break
+
+    def __iter__(self) -> Iterator[interfaces.objects.ObjectInterface]:
+        return self.to_list(self.vol.parent.vol.type_name, self.vol.member_name)
+
+
 class files_struct(objects.StructType):
     def get_fds(self) -> interfaces.objects.ObjectInterface:
         if self.has_member("fdt"):
@@ -1718,6 +1831,14 @@ class mnt_namespace(objects.StructType):
             raise exceptions.VolatilityException(
                 "Unsupported kernel mount namespace implementation"
             )
+    
+    def get_inum(self):
+        if self.has_member('proc_inum'):
+            return self.proc_inum
+        elif self.has_member('ns'):
+            return self.ns.inum
+        else:
+            raise AttributeError('Unable to find namespace -> inum')
 
 
 class net(objects.StructType):
@@ -2790,3 +2911,69 @@ class net_device(objects.StructType):
     def get_ip6_ptr(self):
         # in kernel < 3.0.0, ip6_ptr is a void pointer, so we need to cast it to inet6_dev
         return self.ip6_ptr.dereference().cast('inet6_dev')
+
+
+class nsproxy(objects.StructType):
+    def get_uts_ns(self):
+        if self.has_member('uts_ns'):
+            return self.uts_ns.dereference()
+        else:
+            raise AttributeError('Unable to find nsproxy -> uts_ns')
+
+    def get_ipc_ns(self):
+        if self.has_member('ipc_ns'):
+            return self.ipc_ns.dereference()
+        else:
+            raise AttributeError('Unable to find nsproxy -> ipc_ns')
+    
+    def get_mnt_ns(self):
+        if self.has_member('mnt_ns'):
+            return self.mnt_ns.dereference()
+        elif self.has_member('namespace'):
+            return self.namespace.dereference()
+        else:
+            raise AttributeError('Unable to find nsproxy -> mnt_ns or nsproxy -> namespace')
+        
+    def get_net_ns(self):
+        if self.has_member('net_ns'):
+            return self.net_ns.dereference()
+        else:
+            raise AttributeError('Unable to find nsproxy -> net_ns')
+    
+    def get_user_ns(self):
+        ipc_ns = self.get_ipc_ns()
+
+        if ipc_ns.has_member('user_ns'):
+            return ipc_ns.user_ns.dereference()
+        else:
+            raise AttributeError('Unable to find ipc_namespace -> user_ns')
+
+
+class GenericNamespace(objects.StructType):
+    def get_inum(self):
+        if self.has_member('proc_inum'):
+            return self.proc_inum
+        elif self.has_member('ns'):
+            return self.ns.inum
+        else:
+            raise AttributeError('Unable to find namespace -> inum')
+
+
+class uts_namespace(GenericNamespace):
+    pass
+
+
+class ipc_namespace(GenericNamespace):
+    pass
+
+
+class pid_namespace(GenericNamespace):
+    pass
+
+
+class net(GenericNamespace):
+    pass
+
+
+class user_namespace(GenericNamespace):
+    pass
