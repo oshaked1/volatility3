@@ -76,11 +76,11 @@ class PsList(interfaces.plugins.PluginInterface):
             requirements.BooleanRequirement(name='nsinfo',
                                             description='Display namespace information',
                                             optional=True,
-                                            default=False),
+                                            default=True),
             requirements.BooleanRequirement(name='credinfo',
                                             description='Display credentials and capability information',
                                             optional=True,
-                                            default=False)
+                                            default=True)
         ]
 
     @classmethod
