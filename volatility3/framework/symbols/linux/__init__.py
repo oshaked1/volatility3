@@ -23,6 +23,7 @@ class LinuxKernelIntermedSymbols(intermed.IntermediateSymbolTable):
         self.set_type_class("file", extensions.struct_file)
         self.set_type_class("list_head", extensions.list_head)
         self.set_type_class("hlist_head", extensions.hlist_head)
+        self.set_type_class('hlist_node', extensions.hlist_node)
         self.set_type_class("mm_struct", extensions.mm_struct)
         self.set_type_class("super_block", extensions.super_block)
         self.set_type_class("task_struct", extensions.task_struct)
@@ -53,7 +54,12 @@ class LinuxKernelIntermedSymbols(intermed.IntermediateSymbolTable):
         self.set_type_class("vfsmount", extensions.vfsmount)
         # Might not exist in older kernels or the current symbols
         self.optional_set_type_class("mount", extensions.mount)
+        self.optional_set_type_class('nsproxy', extensions.nsproxy)
         self.optional_set_type_class("mnt_namespace", extensions.mnt_namespace)
+        self.optional_set_type_class('uts_namespace', extensions.uts_namespace)
+        self.optional_set_type_class('ipc_namespace', extensions.ipc_namespace)
+        self.optional_set_type_class('pid_namespace', extensions.pid_namespace)
+        self.optional_set_type_class('user_namespace', extensions.user_namespace)
         self.optional_set_type_class("rb_root", extensions.rb_root)
 
         # Network
@@ -158,6 +164,98 @@ class LinuxUtilities(interfaces.configuration.VersionableInterface):
             dentry = parent
 
         path = "/" + "/".join(reversed(path_reversed))
+        return path
+    
+    # based on __d_path from the Linux kernel
+    @classmethod
+    def _do_get_path(cls, rdentry, rmnt, dentry, vfsmnt) -> str:
+
+        ret_path: List[str] = []
+
+        while dentry != rdentry or vfsmnt != rmnt:
+            dname = dentry.path()
+            if dname == "":
+                break
+
+            ret_path.insert(0, dname.strip('/'))
+            if dentry == vfsmnt.get_mnt_root() or dentry == dentry.d_parent:
+                if vfsmnt.get_mnt_parent() == vfsmnt:
+                    break
+
+                dentry = vfsmnt.get_mnt_mountpoint()
+                vfsmnt = vfsmnt.get_mnt_parent()
+
+                continue
+
+            parent = dentry.d_parent
+            dentry = parent
+
+        # if we did not gather any valid dentrys in the path, then the entire file is
+        # either 1) smeared out of memory or 2) de-allocated and corresponding structures overwritten
+        # we return an empty string in this case to avoid confusion with something like a handle to the root
+        # directory (e.g., "/")
+        if not ret_path:
+            return ""
+
+        ret_val = '/'.join([str(p) for p in ret_path if p != ""])
+
+        if ret_val.startswith(("socket:", "pipe:")):
+            if ret_val.find("]") == -1:
+                try:
+                    inode = dentry.d_inode
+                    ino = inode.i_ino
+                except exceptions.InvalidAddressException:
+                    ino = 0
+
+                ret_val = ret_val[:-1] + f":[{ino}]"
+            else:
+                ret_val = ret_val.replace("/", "")
+
+        elif ret_val != "inotify":
+            ret_val = '/' + ret_val
+
+        return ret_val
+    
+    @classmethod
+    def prepend_path(cls,
+                     dentry: extensions.dentry,
+                     mnt: Union[extensions.mount, extensions.vfsmount],
+                     root: interfaces.objects.ObjectInterface) -> str:
+        """Calculate the path of a dentry. Based on prepend_path from the Linux kernel.
+        See https://elixir.bootlin.com/linux/latest/C/ident/prepend_path
+        """
+        path_reversed = []
+
+        if not mnt.has_member('mnt_parent'):
+            mnt = mnt._get_real_mnt()
+
+        vfsmnt = mnt
+        if mnt.has_member('mnt'):
+            vfsmnt = mnt.mnt
+
+        while dentry.vol.offset != root.dentry or vfsmnt.vol.offset != root.mnt:
+            parent = dentry.d_parent.dereference()
+
+            if dentry.vol.offset == mnt.get_mnt_root():
+                m = mnt.get_mnt_parent().dereference()
+                if mnt.vol.offset != m.vol.offset:
+                    dentry = mnt.get_mnt_mountpoint().dereference()
+                    mnt = m
+                    vfsmnt = mnt
+                    if mnt.has_member('mnt'):
+                        vfsmnt = mnt.mnt
+                    continue
+
+                return None
+            
+            if dentry.vol.offset == parent.vol.offset:
+                return None
+            
+            dname = dentry.d_name.name_as_str()
+            path_reversed.append(dname.strip('/'))
+            dentry = parent
+        
+        path = '/' + '/'.join(reversed(path_reversed))
         return path
 
     @classmethod
@@ -499,6 +597,92 @@ class LinuxUtilities(interfaces.configuration.VersionableInterface):
         return "".join(
             [chr((code >> (i * 8)) & 0xFF) for i in range(code_bytes_length)]
         )
+    
+    @classmethod
+    def _get_time_vars(cls, vmlinux):
+        """Finds global time variables that may be used for time calculations.
+        Sometime in 3.[3-5], Linux switched to a global timekeeper structure
+        This just figures out which is in use and returns the correct variables
+        """
+        has_wall = vmlinux.has_symbol('wall_to_monotonic')
+        has_sleep = vmlinux.has_symbol('total_sleep_time')
+        has_timekeeper = vmlinux.has_symbol('timekeeper')
+        has_tk_core = vmlinux.has_symbol('tk_core')
+
+        wall = None
+        timeo = None
+
+        # old way
+        if has_wall:
+            wall = vmlinux.object_from_symbol('wall_to_monotonic')
+            if has_sleep:
+                timeo = vmlinux.object_from_symbol('total_sleep_time')
+            else:
+                timeo = extensions.VolTimespec(0, 0)
+        
+        # timekeeper way
+        elif has_timekeeper:
+            timekeeper = vmlinux.object_from_symbol('timekeeper')
+            wall = timekeeper.wall_to_monotonic
+            timeo = timekeeper.total_sleep_time
+        
+        elif has_tk_core:
+            tk_core = vmlinux.object_from_symbol('tk_core')
+            timekeeper = tk_core.timekeeper
+            wall = timekeeper.wall_to_monotonic
+
+            # 3.17(ish) - 3.19(ish) way
+            if timekeeper.has_member('total_sleep_time'):
+                timeo = timekeeper.total_sleep_time
+            
+            # 3.19(ish)+
+            # getboottime from 3.19.x
+            else:
+                oreal = timekeeper.offs_real
+                oboot = timekeeper.offs_boot
+
+                if oreal.has_member('tv64'):
+                    tv64 = (oreal.tv64 & 0xffffffff) - (oboot.tv64 & 0xffffffff)
+                else:
+                    tv64 = (oreal & 0xffffffff) - (oboot & 0xffffffff)
+                
+                if tv64:
+                    tv64 = (tv64 / 100000000) * -1
+                    timeo = extensions.VolTimespec(tv64, 0) 
+                else:
+                    timeo = None
+        
+        return (wall, timeo)
+    
+    @classmethod
+    def get_boot_time(cls, vmlinux):
+        """Get the boot time as a Unix timestamp.
+        Based on 2.6.35 getboottime.
+        """
+        nsecs_per_sec = 1000000000
+
+        (wall, timeo) = cls._get_time_vars(vmlinux)
+
+        if wall is None or timeo is None:
+            return -1
+
+        secs = wall.tv_sec + timeo.tv_sec
+        nsecs = wall.tv_nsec + timeo.tv_nsec
+
+        secs = secs * -1
+        nsecs = nsecs * -1
+
+        while nsecs >= nsecs_per_sec:
+            nsecs = nsecs - nsecs_per_sec
+            secs = secs + 1
+
+        while nsecs < 0:
+            nsecs = nsecs + nsecs_per_sec
+            secs = secs - 1
+
+        boot_time = secs + (nsecs / nsecs_per_sec / 100)
+
+        return boot_time
 
 
 class IDStorage(ABC):
