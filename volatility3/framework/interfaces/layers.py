@@ -17,6 +17,7 @@ import traceback
 import types
 from abc import ABCMeta, abstractmethod
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+import inspect
 
 from volatility3.framework import constants, exceptions, interfaces
 
@@ -632,7 +633,15 @@ class LayerContainer(collections.abc.Mapping):
         Returns:
             The result of reading from the requested layer
         """
-        return self[layer].read(offset, length, pad)
+        try:
+            return self[layer].read(offset, length, pad)
+        except Exception:
+            if offset > 1000:
+                vollog.debug(f"error reading {length} bytes from address {hex(offset)}")
+                curframe = inspect.currentframe()
+                for frame in inspect.getouterframes(curframe, 10):
+                    vollog.debug(f"{frame.filename} function {frame.function} line {frame.lineno}")
+            raise
 
     def __eq__(self, other):
         return dict(self) == dict(other)

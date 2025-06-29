@@ -18,6 +18,7 @@ from typing import (
     Union as TUnion,
     overload,
 )
+import inspect
 
 from volatility3.framework import constants, interfaces
 from volatility3.framework.objects import templates
@@ -443,7 +444,14 @@ class Pointer(Integer):
         """Determines whether the address of this pointer can be read from
         memory."""
         layer_name = layer_name or self.vol.native_layer_name
-        return self._context.layers[layer_name].is_valid(self, self.vol.subtype.size)
+        readable = self._context.layers[layer_name].is_valid(self, self.vol.subtype.size)
+        if not readable:
+            if int(self) > 1000:
+                vollog.debug(f"{self.vol.subtype.size} bytes at address {hex(self)} are unreadable")
+                curframe = inspect.currentframe()
+                for frame in inspect.getouterframes(curframe, 10):
+                    vollog.debug(f"{frame.filename} function {frame.function} line {frame.lineno}")
+        return readable
 
     def __getattr__(self, attr: str) -> Any:
         """Convenience function to access unknown attributes by getting them
